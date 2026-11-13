@@ -702,6 +702,9 @@ body.rail-collapsed .rail-fab { opacity: 1; visibility: visible; transform: tran
 }
 .review-item__actions { display: flex; gap: 8px; }
 .auth-note { font-size: 12.5px; line-height: 1.7; color: var(--text-muted); margin: 0 0 16px; }
+
+.auth-note--warn { color: var(--text); }
+.auth-switch { margin-top: 12px; }
 .bubble--pending .bubble__disc { box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); }
 .bubble--pending .bubble__title { opacity: .78; }
 
@@ -1977,9 +1980,54 @@ E 正确文档根本不在库里
   let cloudProfile = null;
   let cloudLibrary = [];
   let authBusy = false;
+  let authKind = 'username';
+  let mailerAutoconfirm = null;
 
   function isAdmin() {
     return !!(cloudProfile && cloudProfile.role === 'admin');
+  }
+
+  function accountName() {
+    if (!cloudUser) return '';
+    const meta = cloudUser.user_metadata || {};
+    if (meta.username) return String(meta.username);
+    const email = (cloudProfile && cloudProfile.email) || cloudUser.email || '';
+    return String(email).split('@')[0] || '已登录';
+  }
+
+  function validUsername(name) {
+    return typeof name === 'string' && name.length >= 2 && name.length <= 20 && !/[\s@]/.test(name);
+  }
+
+  function authMessage(err) {
+    const msg = (err && err.message) || '操作失败';
+    if (/already registered|already been registered/i.test(msg)) return '这个账号已被注册，直接登录';
+    if (/invalid login credentials/i.test(msg)) return '账号或密码不对';
+    if (/email not confirmed/i.test(msg)) return '这个账号还没完成邮箱确认；请用站内账号重新注册';
+    if (/password/i.test(msg) && /6/.test(msg)) return '密码至少 6 位';
+    if (/rate limit|too many/i.test(msg)) return '操作太频繁，请稍后再试';
+    return msg;
+  }
+
+  async function usernameToEmail(username) {
+    if (!window.crypto || !window.crypto.subtle) throw new Error('当前浏览器不支持安全哈希');
+    const raw = new TextEncoder().encode('zhuci:' + username);
+    const buf = await window.crypto.subtle.digest('SHA-256', raw);
+    const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return 'u_' + hex.slice(0, 32) + '@zhuci.local';
+  }
+
+  async function loadAuthSettings() {
+    try {
+      const r = await fetch(CLOUD_URL + '/auth/v1/settings', {
+        headers: { apikey: CLOUD_ANON }, cache: 'no-store'
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      mailerAutoconfirm = !!data.mailer_autoconfirm;
+    } catch (err) {
+      /* keep null; signup will retry */
+    }
   }
 
   function findPrompt(id) {
@@ -2078,9 +2126,9 @@ E 正确文档根本不在库里
   function renderAccount() {
     if (els.accountBtn) {
       if (cloudUser) {
-        const email = (cloudProfile && cloudProfile.email) || cloudUser.email || '已登录';
-        els.accountBtn.textContent = String(email).split('@')[0];
-        els.accountBtn.setAttribute('aria-label', '账号 ' + email);
+        const name = accountName();
+        els.accountBtn.textContent = name;
+        els.accountBtn.setAttribute('aria-label', '账号 ' + name);
       } else {
         els.accountBtn.textContent = '登录';
         els.accountBtn.setAttribute('aria-label', '登录');
@@ -2110,6 +2158,7 @@ E 正确文档根本不在库里
       return;
     }
     if (!cloudUser) {
+      authKind = 'username';
       openDrawer('auth', null);
       return;
     }
@@ -2118,26 +2167,39 @@ E 正确文档根本不在库里
 
   function renderAuth() {
     setDrawerCat({ name: '账号', id: 'sft' });
-    els.drawerTitle.textContent = '登录后才可以新建';
-    els.drawerBody.innerHTML =
-      '<p class="auth-note">用邮箱注册或登录。注册后请到邮箱点确认链接，QQ 邮箱也可以看一下垃圾箱。</p>' +
-      '<form class="edit-form" id="authForm" novalidate>' +
-        '<div class="field"><label class="field__label" for="auth-email">邮箱</label>' +
-        '<input class="input" id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" data-autofocus></div>' +
+    const isEmail = authKind === 'email';
+    els.drawerTitle.textContent = isEmail ? '邮箱登录' : '登录后才可以新建';
+    const warn = (!isEmail && mailerAutoconfirm === false)
+      ? '<p class="auth-note auth-note--warn">站点还开着邮箱确认，直接注册暂不可用；管理员在 Supabase 关闭 Confirm email 后即可注册。</p>'
+      : '';
+    const note = isEmail
+      ? '<p class="auth-note">仅用于之前用邮箱注册的账号。新账号请用站内账号注册。</p>'
+      : '<p class="auth-note">用账号和密码注册或登录；不发送邮件，不跳转第三方。</p>' + warn;
+    const identity = isEmail
+      ? '<div class="field"><label class="field__label" for="auth-email">邮箱</label>' +
+        '<input class="input" id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" data-autofocus></div>'
+      : '<div class="field"><label class="field__label" for="auth-user">账号</label>' +
+        '<input class="input" id="auth-user" name="username" type="text" autocomplete="username" required minlength="2" maxlength="20" placeholder="2–20 个字符，可用中文" data-autofocus></div>';
+    const switchLink = isEmail
+      ? '<button class="link-btn auth-switch" type="button" data-action="auth-user">返回站内账号</button>'
+      : '<button class="link-btn auth-switch" type="button" data-action="auth-email">已有邮箱账号？用邮箱登录</button>';
+    els.drawerBody.innerHTML = note +
+      '<form class="edit-form" id="authForm" novalidate>' + identity +
         '<div class="field"><label class="field__label" for="auth-pass">密码（至少 6 位）</label>' +
         '<input class="input" id="auth-pass" name="password" type="password" autocomplete="current-password" required minlength="6"></div>' +
-      '</form>';
-    els.drawerFoot.innerHTML =
-      '<button class="btn" type="button" data-action="auth-signup">注册</button>' +
-      '<button class="btn btn--primary" type="button" data-action="auth-login">登录</button>';
+      '</form>' + switchLink;
+    els.drawerFoot.innerHTML = isEmail
+      ? '<button class="btn btn--primary" type="button" data-action="auth-login">登录</button>'
+      : '<button class="btn" type="button" data-action="auth-signup">注册</button>' +
+        '<button class="btn btn--primary" type="button" data-action="auth-login">登录</button>';
   }
 
   function renderAccountPanel() {
-    const email = (cloudProfile && cloudProfile.email) || (cloudUser && cloudUser.email) || '';
+    const name = accountName();
     setDrawerCat({ name: '账号', id: 'sft' });
     els.drawerTitle.textContent = '账号';
     els.drawerBody.innerHTML =
-      '<p class="auth-note">当前登录：' + esc(email) + (isAdmin() ? '（管理员）' : '') + '。<br>新建时可以选择只保存在本机，或提交到云端，通过审核后其他人才会看到。</p>';
+      '<p class="auth-note">当前登录：' + esc(name) + (isAdmin() ? '（管理员）' : '') + '。<br>新建时可以选择只保存在本机，或提交到云端，通过审核后其他人才会看到。</p>';
     els.drawerFoot.innerHTML =
       '<button class="btn" type="button" data-action="close">关闭</button>' +
       '<button class="btn btn--danger" type="button" data-action="auth-logout">退出登录</button>';
@@ -2172,31 +2234,53 @@ E 正确文档根本不在库里
     if (authBusy) return;
     const form = $('#authForm');
     if (!form) return;
-    const email = String(form.email.value || '').trim();
+    const isEmail = authKind === 'email';
+    const identity = String((isEmail ? form.email && form.email.value : form.username && form.username.value) || '').trim();
     const password = String(form.password.value || '');
-    if (!email || !password || password.length < 6) {
-      showToast('请填写邮箱，密码至少 6 位', true);
+    if (isEmail) {
+      if (!identity) { showToast('请填写邮箱', true); return; }
+    } else if (!validUsername(identity)) {
+      showToast('账号 2–20 个字符，不能有空格或 @', true);
+      return;
+    }
+    if (!password || password.length < 6) {
+      showToast('密码至少 6 位', true);
+      return;
+    }
+    if (mode === 'signup' && isEmail) {
+      showToast('新账号请用站内账号注册', true);
       return;
     }
     authBusy = true;
-    const redirectTo = window.location.origin + (window.location.pathname || '/');
     try {
+      let email = identity;
+      if (!isEmail) email = await usernameToEmail(identity);
       if (mode === 'signup') {
+        if (mailerAutoconfirm !== true) await loadAuthSettings();
+        if (mailerAutoconfirm !== true) {
+          showToast('站点还开着邮箱确认，请管理员关闭 Confirm email 后再注册', true);
+          authBusy = false;
+          return;
+        }
         const { data, error } = await sb.auth.signUp({
           email: email,
           password: password,
-          options: { emailRedirectTo: redirectTo }
+          options: { data: { username: identity, display_name: identity } }
         });
         if (error) throw error;
-        if (data.session) showToast('注册成功，已登录');
-        else showToast('注册成功，请到邮箱点确认链接后再登录');
+        if (!data.session) {
+          showToast('注册成功，但站点仍要求邮箱确认；请管理员关闭后再登录', true);
+          authBusy = false;
+          return;
+        }
+        showToast('注册成功，已登录');
       } else {
         const { error } = await sb.auth.signInWithPassword({ email: email, password: password });
         if (error) throw error;
         showToast('已登录');
       }
     } catch (err) {
-      showToast((err && err.message) || '登录失败', true);
+      showToast(authMessage(err), true);
       authBusy = false;
       return;
     }
@@ -3267,7 +3351,10 @@ E 正确文档根本不在库里
 
     els.newBtnTop.addEventListener('click', () => requestNew());
     if (els.accountBtn) {
-      els.accountBtn.addEventListener('click', () => openDrawer(cloudUser ? 'account' : 'auth', null));
+      els.accountBtn.addEventListener('click', () => {
+      if (!cloudUser) authKind = 'username';
+      openDrawer(cloudUser ? 'account' : 'auth', null);
+    });
     }
     if (els.reviewBtn) {
       els.reviewBtn.addEventListener('click', () => openDrawer('review', null));
@@ -3300,7 +3387,7 @@ E 正确文档根本不在库里
       const btn = e.target.closest('[data-empty]');
       if (!btn) return;
       const action = btn.dataset.empty;
-      if (action === 'new') { openDrawer('edit', null); return; }
+      if (action === 'new') { requestNew(); return; }
       if (action === 'all') { state.view = 'all'; state.tag = null; renderAll(); return; }
       if (action === 'reset') { resetLibrary(); return; }
       state.tag = null;
@@ -3378,6 +3465,8 @@ E 正确文档根本不在库里
       else if (action === 'save') { saveEditor(); }
       else if (action === 'auth-login') { submitAuth('login'); }
       else if (action === 'auth-signup') { submitAuth('signup'); }
+      else if (action === 'auth-email') { authKind = 'email'; renderAuth(); }
+      else if (action === 'auth-user') { authKind = 'username'; renderAuth(); }
       else if (action === 'auth-logout') { signOut(); }
       else if (action === 'review-approve') { reviewPrompt(actionEl.dataset.id, 'approved'); }
       else if (action === 'review-reject') { reviewPrompt(actionEl.dataset.id, 'rejected'); }
@@ -3385,6 +3474,7 @@ E 正确文档根本不在库里
 
     els.drawer.addEventListener('submit', (e) => {
       e.preventDefault();
+      if (drawerState && drawerState.mode === 'auth') { submitAuth('login'); return; }
       saveEditor();
     });
 
@@ -3500,6 +3590,7 @@ E 正确文档根本不在库里
 
     sb = initSupabase();
     if (sb) {
+      loadAuthSettings();
       sb.auth.onAuthStateChange(async (event, session) => {
         cloudUser = session && session.user ? session.user : null;
         await refreshCloud();
