@@ -270,8 +270,8 @@ body.rail-collapsed .rail-fab { opacity: 1; visibility: visible; transform: tran
 ### 4.5c 站内账号与云端（Supabase）
 
 - 顶栏右侧 `登录` chip：未登录显示「登录」，已登录显示账号名；点击打开抽屉。
-- 注册/登录只用**账号 + 密码**（账号 2–20 个字符，可用中文），不出现邮箱输入；旧邮箱账号从抽屉底部「已有邮箱账号？」进入。
-- 账号经 SHA-256 映射为内部标识 `u_<hash>@zhuci.local` 写入 Supabase Auth；密码由 Supabase 哈希保存，用户名存 `user_metadata.username`。用户不接触邮箱，也不发确认邮件。
+- 注册/登录只用**账号 + 密码**（账号 2–20 个字符，可用中文）；抽屉里没有邮箱字段、邮箱登录入口或第三方按钮。
+- 账号经 SHA-256 映射为内部标识写入 Supabase Auth；该标识不接收/发送邮件、不在 UI 出现。密码由 Supabase 哈希保存，用户名存 `user_metadata.username`。
 - 注册与登录共用抽屉；`mailer_autoconfirm` 必须为 `true`，否则注册前直接提示管理员关闭 Confirm email，**不创建未确认账号**。注册成功后 `signUp` 返回 session，直接进入登录态。
 - 浏览、搜索、复制、收藏不要求登录；**打开新建抽屉前要求登录**，未登录先进入登录界面。
 - 云端条目状态：`pending → approved`；`profiles.role = 'admin'` 的账号看到「审核」，通过后进入公共库；本机条目不上传。
